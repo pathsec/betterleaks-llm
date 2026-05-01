@@ -76,8 +76,8 @@ available from [upstream betterleaks](https://github.com/betterleaks/betterleaks
 but track the upstream codebase, not this fork.
 
 ```bash
-git clone https://github.com/betterleaks/betterleaks
-cd betterleaks
+git clone https://github.com/pathsec/betterleaks-llm
+cd betterleaks-llm
 go build -o betterleaks .
 ./betterleaks --version
 ```
