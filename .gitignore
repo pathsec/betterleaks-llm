@@ -25,3 +25,10 @@ testdata/expected/report/*.got.*
 *.out
 
 dist/
+
+# LLM runtime output — regenerated on each scan
+*.jsonl
+
+# Python
+__pycache__/
+*.pyc

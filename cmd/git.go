@@ -146,5 +146,6 @@ func runGit(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	findingSummaryAndExit(detector, findings, exitCode, start, err)
+	// LLM discovery is not applicable to git diff/patch mode.
+	findingSummaryAndExit(detector, findings, exitCode, start, err, "")
 }

@@ -1,128 +1,105 @@
-# Betterleaks
+# Betterleaks LLM — AI-Powered Secret Scanner
+
+> **Fork notice:** This repository is an LLM-powered fork of [betterleaks/betterleaks](https://github.com/betterleaks/betterleaks), adding a two-phase LLM pipeline (secret discovery + false-positive verification) on top of the existing regex engine. Upstream: `git remote add upstream https://github.com/betterleaks/betterleaks`
+
+[![upstream: betterleaks/betterleaks](https://img.shields.io/badge/upstream-betterleaks%2Fbetterleaks-blue)](https://github.com/betterleaks/betterleaks)
+[![builds upon: gitleaks/gitleaks](https://img.shields.io/badge/builds%20upon-gitleaks%2Fgitleaks-green)](https://github.com/gitleaks/gitleaks)
+
+### New in this fork
+
+#### LLM Secret Discovery + Verification (`--llm`)
+
+A single flag enables a two-phase LLM pipeline on top of the regex scan,
+using a **locally hosted model** via [Ollama](https://ollama.com/):
+
+1. **Discovery** — every file is scanned for lines containing credential
+   keywords **or** high-entropy tokens (raw API keys, hashes, base64 blobs
+   with no obvious variable name). Matching windows are sent to the LLM which
+   extracts secret values the regex engine missed.
+
+2. **Verification** — all findings (regex + discovered) are re-evaluated with
+   5 lines of surrounding file context. Findings classified as `FALSE_POSITIVE`
+   with confidence ≥ `--llm-min-confidence` are suppressed.
+
+All LLM verdicts are appended to `llm_audit.jsonl` for review.
+
+```bash
+# One-time setup
+ollama pull llama3        # or: mistral, codellama, etc.
+
+# Scan any directory — findings print to stdout by default
+betterleaks dir ./my-repo
+betterleaks dir --llm ./my-repo
+
+# Save structured output
+betterleaks dir --llm -r findings.json ./my-repo
+
+# Tune the pipeline
+betterleaks dir --llm --llm-model mistral --llm-workers 8 ./my-repo
+betterleaks dir --llm --llm-entropy-min-len 16 ./my-repo  # catch shorter keys
 ```
-  ○
-  ○
-  ●
-  ○
-```
 
-Betterleaks is a tool for finding secrets like passwords and API keys. If you want to learn more about how the detection engine works check out this blog: [Regex is (almost) all you need](https://lookingatcomputer.substack.com/p/regex-is-almost-all-you-need).
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--llm` | off | Enable LLM discovery + verification pipeline |
+| `--llm-model` | `llama3` | Ollama model name |
+| `--llm-host` | `http://localhost:11434` | Ollama server URL |
+| `--llm-min-confidence` | `0.75` | Suppress FALSE_POSITIVE verdicts below this threshold |
+| `--llm-workers` | `4` | Concurrent LLM requests during discovery |
+| `--llm-entropy-min-len` | `20` | Minimum token length for entropy-based line triggering (lower = more findings, higher = fewer false positives) |
 
-Betterleaks is maintained by the folks who made Gitleaks, including the original author. Development is supported by <a href="https://www.aikido.dev">Aikido Security</a>
-<br><a href="https://www.aikido.dev"><img src="docs/aikido_log.svg" alt="Aikido Security" width="80" /></a>
+The LLM layer is **off by default** and never changes behavior without `--llm`.
+If Ollama is unreachable, betterleaks warns and returns all findings unfiltered.
 
-### Notable Features
+#### Benchmark Results (leaky-repo)
 
-| Feature | Description |
-| :--- | :--- |
-| **CEL-based filtering** | Write contextual rule filters that evaluate fragment (data chunks) attributes (like git author, commit message, and file path) and finding data to reduce false positives. If you're coming from Gitleaks, think of this feature as a more expressive `[[allowlist]]` system. |
-| **Secrets Validation** | Validate if a detected secret is active by making asynchronous HTTP requests directly from within the rule definition using CEL. |
-| **Token Efficiency filtering** | Filter out natural language false positives by using BPE tokenization to measure how "rare" or non-human a string is. |
-| **Fast scans** | Achieve fast performance through sane default parallelization settings, ahocorasick keyword filters, and re2. |
-| **Portability** | Runs on any modern OS/Arch. The small binary can be integrated in any system. |
+Evaluated against [leaky-repo](https://github.com/Plazmaz/leaky-repo) — 96 known
+risk secrets across 42 files. Ground truth: `.leaky-meta/secrets.csv`.
 
+| Mode | Findings | TP | FP (total) | FP (real-repo¹) | Recall | Scan time |
+|------|----------|----|------------|-----------------|--------|-----------|
+| Regex only | 22 | 21 | 1 | 1 | 21.9% | 0.3s |
+| + `--llm` (llama3) | 362 | 84 | 278 | 77 | 87.5% | 871s |
 
-### Installation
-```
-# Package managers
-brew install betterleaks
-brew install betterleaks/tap/betterleaks
+¹ **FP (real-repo)** excludes findings in leaky-repo's own benchmark
+documentation files (`.leaky-meta/`, `README.md`, `LICENSE`, `.gitattributes`,
+`high-entropy-misc.txt`). These files contain credential-shaped strings
+*describing* the benchmark — they are a structural artifact of this dataset and
+would not exist in a real codebase.
 
-# Fedora Linux
-sudo dnf install betterleaks
+See [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md) for the full per-file breakdown.
 
-# Containers
-docker pull ghcr.io/betterleaks/betterleaks:latest
+## Installation
 
-# Source
+This is a source-only fork. Pre-built packages (brew, dnf, Docker) are
+available from [upstream betterleaks](https://github.com/betterleaks/betterleaks)
+but track the upstream codebase, not this fork.
+
+```bash
 git clone https://github.com/betterleaks/betterleaks
 cd betterleaks
-make build
+go build -o betterleaks .
+./betterleaks --version
 ```
 
-### Usage
-```
-# Scan Git
-betterleaks git /path/to/repo -v --git-workers=16
+Go 1.21+ required. The binary has no runtime dependencies beyond Ollama (optional, for `--llm`).
 
-# Scan local filesystem
-betterleaks dir /path/to/file/or/dir -v
+### Ollama (for `--llm`)
 
-# Scan stdin
-cat some_file.txt | betterleaks stdin -v
-```
+```bash
+# Install Ollama — https://ollama.com/download
+curl -fsSL https://ollama.com/install.sh | sh
 
-### Configuration
+# Pull a model (llama3 recommended; mistral also works well)
+ollama pull llama3
 
-Betterleaks' strength comes from its expressive configuration. Filtering and validation logic are defined as CEL. It is recommended you spend 30 minutes familiarizing yourself with [CEL](https://cel.dev) before writing filters and validators. `prefilter`s run before any regex matching occurs and only have access to the `attributes` map. `attributes` describe a resource like a git patch. Use `prefilter`s to quickly bail out before more expensive scanning happens. `filter`s, on the other hand, get evaluated post-regex match and have access to the `attributes` map and candidate `finding` data like `finding["secret"]` or `finding["match"]`.
-
-```toml
-# Global prefilter, it runs before expensive regex calls
-prefilter = '''
-(matchesAny(attributes[?"path"].orValue(""), [
-  r"""(?i)\.(?:bmp|gif|jpe?g|png|svg|tiff|pdf|exe)$""",
-  r"""(?:^|/)node_modules(?:/.*)?$""",
-  r"""(?:^|/)vendor(?:/.*)?$"""
-]))
-|| attributes[?"git.author_name"].orValue("") == "renovate[bot]"
-'''
-
-# Global filter, it runs for _every_ candidate secret.
-filter = '''
-containsAny(finding["secret"], [
-  "EXAMPLE",
-  "CHANGEME",
-  "YOUR_API_KEY_HERE",
-  "0000000000000000"
-])
-'''
-
-# An array of tables that contain data on how to detect secrets
-[[rules]]
-id = "github-fine-grained-pat"
-description = "GitHub Fine-Grained Personal Access Token, risking unauthorized repo access."
-regex = '''github_pat_\w{82}'''
-keywords = ["github_pat_"]
-
-# Rule-level filter
-filter = '''
-(
-    attributes[?"git.author_name"].orValue("") == "ci-runner" &&
-    attributes[?"path"].orValue("").startsWith("mocks/") &&
-    finding["secret"].contains("TESTING")
-)
-|| (entropy(finding["secret"]) <= 3.0)
-'''
-
-# Post-match-and-filter async validation check
-validate = '''
-cel.bind(r,
-  http.get("https://api.github.com/user", {
-    "Accept": "application/vnd.github+json",
-    "Authorization": "token " + secret
-  }),
-  r.status == 200 && r.json.?login.orValue("") != "" ? {
-    "result": "valid",
-    "username": r.json.?login.orValue(""),
-    "name": r.json.?name.orValue(""),
-    "scopes": r.headers[?"x-oauth-scopes"].orValue("")
-  } : r.status in [401, 403] ? {
-    "result": "invalid",
-    "reason": "Unauthorized"
-  } : unknown(r)
-)
-'''
+# Ollama runs on http://localhost:11434 by default — no further config needed
 ```
 
-Refer to the default [betterleaks config](https://github.com/betterleaks/betterleaks/blob/master/config/betterleaks.toml) for examples and the [config docs](docs/config.md) for more information about the `betterleaks.toml` config.
+## Further Reading
 
-### Exit Codes
-
-Set the exit code when leaks are encountered with the --exit-code flag. Default exit codes below:
-
-```
-0 - no leaks present
-1 - leaks or error encountered
-126 - unknown flag
-```
-
+For full documentation on configuration, rules, allowlists, composite rules,
+secrets validation (CEL), archive scanning, and all CLI flags, refer to the
+[upstream betterleaks repository](https://github.com/betterleaks/betterleaks).
+This fork tracks upstream and inherits all of its functionality; only the
+additions described in [New in this fork](#new-in-this-fork) are specific here.

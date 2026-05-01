@@ -17,6 +17,7 @@ import (
 
 	"github.com/betterleaks/betterleaks/config"
 	"github.com/betterleaks/betterleaks/detect"
+	"github.com/betterleaks/betterleaks/llm"
 	"github.com/betterleaks/betterleaks/logging"
 	"github.com/betterleaks/betterleaks/regexp"
 	regexpre2 "github.com/betterleaks/betterleaks/regexp/re2"
@@ -98,6 +99,17 @@ func init() {
 	_ = rootCmd.PersistentFlags().MarkHidden("regexp-engine")
 
 	rootCmd.PersistentFlags().String("experiments", "", "comma-separated list of experimental features to enable")
+
+	// LLM-assisted secret discovery flags.
+	// --llm runs a two-phase pipeline: keyword+entropy discovery on each file to
+	// find secrets regex missed, then verification of all findings with file context.
+	// Requires Ollama running locally: https://ollama.com
+	rootCmd.PersistentFlags().Bool("llm", false, "enable LLM pipeline: discover secrets regex missed, then verify all findings (requires Ollama)")
+	rootCmd.PersistentFlags().String("llm-model", llm.DefaultModel, `Ollama model name (e.g. "llama3", "mistral", "codellama")`)
+	rootCmd.PersistentFlags().String("llm-host", llm.DefaultHost, "Ollama base URL")
+	rootCmd.PersistentFlags().Float64("llm-min-confidence", 0.75, "suppress false-positive verdicts below this confidence (0.0–1.0)")
+	rootCmd.PersistentFlags().Int("llm-workers", llm.DefaultDiscoverWorkers, "concurrent LLM requests during discovery")
+	rootCmd.PersistentFlags().Int("llm-entropy-min-len", llm.DefaultEntropyMinLen, "minimum token length for entropy-based secret detection (lower = more findings, higher = fewer false positives)")
 
 	// Validation flags
 	rootCmd.PersistentFlags().Bool("validation", false, "enable validation of findings against live APIs")
@@ -183,6 +195,7 @@ func initConfig(source string) {
 	if err != nil {
 		logging.Fatal().Msg(err.Error())
 	}
+
 	if cfgPath != "" {
 		resolvedConfigPath = cfgPath
 		viper.SetConfigFile(cfgPath)
@@ -528,10 +541,58 @@ func bytesConvert(bytes uint64) string {
 	return fmt.Sprintf("%s %s", stringValue, unit)
 }
 
-func findingSummaryAndExit(detector *detect.Detector, findings []report.Finding, exitCode int, start time.Time, err error) {
+// findingSummaryAndExit handles post-scan processing (LLM verify/discover),
+// report writing, and process exit.  discoverSources are the filesystem paths
+// to scan for LLM discovery; pass nil/empty to skip discovery (e.g. git/stdin modes).
+func findingSummaryAndExit(detector *detect.Detector, findings []report.Finding,
+	exitCode int, start time.Time, err error, discoverSources ...string) {
 	if diagnosticsManager.Enabled {
 		logging.Debug().Msg("Finalizing diagnostics...")
 		diagnosticsManager.StopDiagnostics()
+	}
+
+	// LLM discovery + verification pipeline (optional, --llm).
+	// Step 1: keyword+entropy scan to find secrets the regex engine missed.
+	// Step 2: verify ALL findings (regex + discovered) with surrounding file context.
+	activeSources := make([]string, 0, len(discoverSources))
+	for _, s := range discoverSources {
+		if s != "" {
+			activeSources = append(activeSources, s)
+		}
+	}
+	if llmDiscover, _ := rootCmd.PersistentFlags().GetBool("llm"); llmDiscover && len(activeSources) > 0 {
+		llmModel, _ := rootCmd.PersistentFlags().GetString("llm-model")
+		llmHost, _ := rootCmd.PersistentFlags().GetString("llm-host")
+		llmMinConf, _ := rootCmd.PersistentFlags().GetFloat64("llm-min-confidence")
+		llmWorkers, _ := rootCmd.PersistentFlags().GetInt("llm-workers")
+		llmEntropyMinLen, _ := rootCmd.PersistentFlags().GetInt("llm-entropy-min-len")
+
+		llmCfg := llm.Config{
+			Model:         llmModel,
+			Host:          llmHost,
+			MinConf:       llmMinConf,
+			Workers:       llmWorkers,
+			EntropyMinLen: llmEntropyMinLen,
+		}
+
+		for _, src := range activeSources {
+			logging.Info().
+				Str("model", llmModel).
+				Str("host", llmHost).
+				Str("source", src).
+				Int("workers", llmWorkers).
+				Msg("LLM discover: scanning files for secrets beyond regex rules")
+
+			discovered := llm.DiscoverSecrets(context.Background(), src, llmCfg, findings)
+			if len(discovered) > 0 {
+				findings = append(findings, discovered...)
+			}
+		}
+
+		logging.Info().
+			Int("findings", len(findings)).
+			Msg("LLM verify: running post-discovery false-positive reduction with file context")
+		findings = llm.FilterFalsePositives(context.Background(), findings, llmCfg)
 	}
 
 	if detector.ValidationPool != nil {
@@ -563,6 +624,12 @@ func findingSummaryAndExit(detector *detect.Detector, findings []report.Finding,
 		} else {
 			logging.Warn().Msg("no leaks found in partial scan")
 		}
+	}
+
+	// Default output: when no structured reporter is configured, print findings
+	// to stdout in a grep-friendly format so plain `betterleaks dir .` is useful.
+	if detector.Reporter == nil && len(findings) > 0 {
+		printFindings(findings)
 	}
 
 	// write report if desired
@@ -658,4 +725,21 @@ func mustGetStringFlag(cmd *cobra.Command, name string) string {
 		logging.Fatal().Err(err).Msgf("could not get flag: %s", name)
 	}
 	return value
+}
+
+// printFindings writes findings to stdout in a grep-compatible format:
+//
+//	path/to/file:42: [rule-id] secret-preview
+//
+// Secrets are truncated at 60 characters so terminal output stays readable.
+// Use --report-path / --report-format for full structured output.
+func printFindings(findings []report.Finding) {
+	const maxSecret = 60
+	for _, f := range findings {
+		secret := f.Secret
+		if len(secret) > maxSecret {
+			secret = secret[:maxSecret] + "..."
+		}
+		fmt.Printf("%s:%d: [%s] %s\n", f.File, f.StartLine, f.RuleID, secret)
+	}
 }

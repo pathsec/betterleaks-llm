@@ -87,7 +87,7 @@ func runDirectory(cmd *cobra.Command, args []string) {
 
 	lastDetector.TotalBytes.Swap(totalBytes)
 
-	findingSummaryAndExit(lastDetector, allFindings, exitCode, start, scanErr)
+	findingSummaryAndExit(lastDetector, allFindings, exitCode, start, scanErr, sourcesList...)
 }
 
 // removeNestedPaths filters out paths that are children of other paths in the

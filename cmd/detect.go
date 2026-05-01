@@ -134,5 +134,10 @@ func runDetect(cmd *cobra.Command, args []string) {
 		}
 	}
 
-	findingSummaryAndExit(detector, findings, exitCode, start, err)
+	// Pass sourcePath for LLM discovery only when scanning as a plain directory.
+	llmDiscoverPath := ""
+	if noGit {
+		llmDiscoverPath = sourcePath
+	}
+	findingSummaryAndExit(detector, findings, exitCode, start, err, llmDiscoverPath)
 }
